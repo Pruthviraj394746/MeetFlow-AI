@@ -75,7 +75,7 @@ const Dashboard = () => {
         <div className="absolute top-0 right-0 w-64 h-64 bg-brand-500/10 rounded-full blur-3xl -mr-20 -mt-20" />
         
         <div className="relative z-10 text-center md:text-left">
-          <h1 className="text-5xl font-black mb-3 tracking-tighter">Nexus AI <br/> Meeting Platform</h1>
+          <h1 className="text-5xl font-black mb-3 tracking-tighter">Meetflow AI <br/> Meeting Platform</h1>
           <p className="text-slate-400 text-xl font-medium max-w-md">Secure, real-time collaboration with intelligent monitoring.</p>
         </div>
         

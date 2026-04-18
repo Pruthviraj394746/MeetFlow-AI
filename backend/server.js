@@ -3,11 +3,13 @@ const http = require('http');
 const { Server } = require('socket.io');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const multer = require('multer');
 require('dotenv').config();
 const path = require('path');
 const os = require('os');
 
 const { extractActionItems } = require('./services/nlpService');
+const { getAiResponse, transcribeMeetingAudio } = require('./services/aiChatService');
 const Meeting = require('./models/Meeting');
 const Transcript = require('./models/Transcript');
 const ActionItem = require('./models/ActionItem');
@@ -18,6 +20,11 @@ const server = http.createServer(app);
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }
+});
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
@@ -36,6 +43,25 @@ mongoose.connect(MONGODB_URI)
 const meetingsStore = {};
 // Format: { roomId: [ { userId, userName, message, timestamp, msgId, deviceType } ] }
 const messageStore = {};
+
+const createChatMessage = ({ userId, userName, message, deviceType }) => ({
+  userId,
+  userName,
+  message: (message || '').trim(),
+  timestamp: new Date().toISOString(),
+  msgId: Date.now().toString() + '_' + Math.random().toString(36).substr(2, 5),
+  deviceType: deviceType || 'Desktop'
+});
+
+const pushMessageToRoomStore = (roomId, msgObj) => {
+  if (!messageStore[roomId]) messageStore[roomId] = [];
+  messageStore[roomId].push(msgObj);
+
+  // Memory Management: Max 100 messages per room
+  if (messageStore[roomId].length > 100) {
+    messageStore[roomId].shift();
+  }
+};
 
 /* ============================ API ============================ */
 const tryDb = async (fn, fallback) => {
@@ -105,6 +131,37 @@ app.get('/api/meetings/:id', async (req, res) => {
 });
 app.get('/api/action-items', async (req, res) => res.json(await tryDb(() => ActionItem.find().sort({ createdAt: -1 }), [])));
 app.put('/api/action-items/:id', async (req, res) => res.json(await tryDb(() => ActionItem.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }), { _id: req.params.id, status: req.body.status })));
+app.post('/api/ai/audio-query', upload.single('audio'), async (req, res) => {
+  try {
+    const { roomId, userName, prompt } = req.body;
+
+    if (!roomId || !prompt || typeof prompt !== 'string') {
+      return res.status(400).json({ error: 'roomId and prompt are required.' });
+    }
+
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'Audio file is required.' });
+    }
+
+    const transcript = await transcribeMeetingAudio({
+      audioBuffer: req.file.buffer,
+      mimeType: req.file.mimetype,
+      fileName: req.file.originalname
+    });
+
+    const answer = await getAiResponse({
+      prompt: prompt.trim(),
+      userName,
+      roomId,
+      audioTranscript: transcript
+    });
+
+    res.json({ transcript, answer });
+  } catch (error) {
+    console.error('Audio AI query failed:', error.message);
+    res.status(500).json({ error: 'Failed to process meeting audio with AI.' });
+  }
+});
 
 /* ============================ WEBRTC SIGNALING ============================ */
 const rooms = {};
@@ -201,9 +258,9 @@ io.on("connection", (socket) => {
   socket.on("toggle-task", (payload) => {
     socket.to(payload.meetingId).emit("task-updated", payload);
   });
-
+  
   /* === GROUP CHAT === */
-  socket.on("send-message", (data) => {
+  socket.on("send-message", async (data) => {
     // Validation
     if (!data.message || typeof data.message !== 'string' || data.message.trim() === '') return;
     if (!data.roomId || !data.userId) return;
@@ -212,27 +269,85 @@ io.on("connection", (socket) => {
     if (!Array.from(socket.rooms).includes(data.roomId)) {
         console.log(`🚫 Security: Socket ${socket.id} attempted to broadcast to ${data.roomId} without membership. [Rooms: ${Array.from(socket.rooms)}]`);
         return;
-    }
+      }
 
-    const msgObj = {
+    const msgObj = createChatMessage({
       userId: data.userId,
       userName: data.userName || 'Guest',
-      message: data.message.trim(),
-      timestamp: new Date().toISOString(),
-      msgId: Date.now().toString() + '_' + Math.random().toString(36).substr(2, 5),
-      deviceType: data.deviceType || 'Desktop'
-    };
-
-    if (!messageStore[data.roomId]) messageStore[data.roomId] = [];
-    messageStore[data.roomId].push(msgObj);
-
-    // Memory Management: Max 100 messages per room
-    if (messageStore[data.roomId].length > 100) {
-      messageStore[data.roomId].shift();
-    }
-
+      message: data.message,
+      deviceType: data.deviceType
+    });
+    
+    pushMessageToRoomStore(data.roomId, msgObj);
+    
     // Atomic Broadcast
     io.to(data.roomId).emit("receive-message", msgObj);
+    
+    // @meetflow command support.
+    if (data.aiHandled === true) return;
+
+    const match = data.message.trim().match(/^@meetflow\s+([\s\S]+)$/i);
+    if (!match) return;
+
+    const promptText = match[1].trim();
+    if (!promptText) {
+      const emptyPromptReply = createChatMessage({
+        userId: 'meetflow-ai',
+        userName: 'MeetFlow AI',
+        message: 'Please add a question after @meetflow.',
+        deviceType: 'AI'
+      });
+      pushMessageToRoomStore(data.roomId, emptyPromptReply);
+      io.to(data.roomId).emit("receive-message", emptyPromptReply);
+      return;
+    }
+    
+    try {
+      const aiReply = await getAiResponse({
+        prompt: promptText,
+        userName: data.userName,
+        roomId: data.roomId
+      });
+      
+      const aiMsgObj = createChatMessage({
+        userId: 'meetflow-ai',
+        userName: 'MeetFlow AI',
+        message: aiReply,
+        deviceType: 'AI'
+      });
+
+      pushMessageToRoomStore(data.roomId, aiMsgObj);
+      io.to(data.roomId).emit("receive-message", aiMsgObj);
+    } catch (err) {
+      console.error('MeetFlow AI error:', err.message);
+      const errorMsgObj = createChatMessage({
+        userId: 'meetflow-ai',
+        userName: 'MeetFlow AI',
+        message: 'I could not respond right now. Please try again in a moment.',
+        deviceType: 'AI'
+      });
+      pushMessageToRoomStore(data.roomId, errorMsgObj);
+      io.to(data.roomId).emit("receive-message", errorMsgObj);
+    }
+  });
+
+  socket.on("send-ai-message", (data) => {
+    if (!data || !data.roomId || !data.message) return;
+
+    // Security guard: only allow broadcasting to joined room.
+    if (!Array.from(socket.rooms).includes(data.roomId)) {
+      return;
+    }
+
+    const aiMsgObj = createChatMessage({
+      userId: 'meetflow-ai',
+      userName: 'MeetFlow AI',
+      message: data.message,
+      deviceType: 'AI'
+    });
+
+    pushMessageToRoomStore(data.roomId, aiMsgObj);
+    io.to(data.roomId).emit("receive-message", aiMsgObj);
   });
 
   socket.on("sync-chat-state", (roomId) => {

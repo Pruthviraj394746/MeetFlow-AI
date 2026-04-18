@@ -20,7 +20,7 @@ const Sidebar = ({ darkMode, setDarkMode }) => {
             <Mic className="text-white w-5 h-5" />
           </div>
           <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-brand-500 to-indigo-500">
-            Nexus AI
+            Meetflow AI
           </h1>
         </div>
 

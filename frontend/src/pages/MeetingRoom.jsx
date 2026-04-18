@@ -254,7 +254,7 @@ const MeetingRoom = () => {
 
                             {activeSidebar === 'chat' && (
                                 <motion.div key="c-tab" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }} className="h-full min-h-[400px]">
-                                    <GroupChat roomId={meetingId} userName={userName} />
+                                    <GroupChat roomId={meetingId} userName={userName} localStream={localStream} />
                                 </motion.div>
                             )}
                         </AnimatePresence>
