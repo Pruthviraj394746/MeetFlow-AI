@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 transition-all duration-300;
+    font-family: 'Inter', sans-serif;
+  }
+  
+  .dark body {
+    @apply bg-dark-bg text-slate-100;
+  }
+
+  /* Smooth scrolling for better UX */
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-white/70 backdrop-blur-md border border-white/20 shadow-lg transition-all duration-300;
+  }
+  
+  .dark .glass {
+    @apply bg-dark-card/70 backdrop-blur-md border border-slate-700/50 shadow-slate-900/50;
+  }
+
+  /* NEW: Hover lift effect (safe utility) */
+  .hover-lift {
+    @apply transition-transform duration-300 ease-in-out hover:-translate-y-1 hover:shadow-xl;
+  }
+
+  /* NEW: Gradient text utility */
+  .gradient-text {
+    @apply bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 bg-clip-text text-transparent;
+  }
+}
+
+/* Custom Scrollbar for sleek UI */
+::-webkit-scrollbar {
+  width: 8px; /* slightly improved */
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(to bottom, #cbd5e1, #94a3b8); /* nicer gradient */
+  border-radius: 10px;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: linear-gradient(to bottom, #475569, #1e293b);
+}

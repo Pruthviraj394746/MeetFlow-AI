@@ -1,0 +1,23 @@
+backend/node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Environment files (never commit real secrets)
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Secret and key material
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
+id_dsa
+id_dsa.pub
+id_ed25519
+id_ed25519.pub
