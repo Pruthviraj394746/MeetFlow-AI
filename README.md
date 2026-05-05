@@ -162,3 +162,12 @@ This project is licensed under the **ISC License**.
 ## 💡 Credits
 
 Developed by the **MeetFlow-AI Team** 🚀
+---
+
+## 🔧 Updates by Pruthviraj
+
+- Improved documentation structure
+- Added additional clarity for project setup
+- Minor enhancements for better understanding
+
+
