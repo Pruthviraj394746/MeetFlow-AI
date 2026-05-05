@@ -46,6 +46,44 @@ const VideoPlayer = ({ stream, isLocal, name }) => {
     );
 };
 
+function extractName(text, usersList, currentUser) {
+    const lower = text.toLowerCase();
+    
+    for (let user of usersList) {
+        if (lower.includes(user.toLowerCase())) {
+            return user;
+        }
+    }
+    
+    // fallback to current user so actions never disappear
+    return currentUser;
+}
+
+function extractTime(text) {
+    const match = text.match(/(\d{1,2}(:\d{2})?\s?(am|pm)?)/i);
+    return match ? match[0] : "No deadline";
+}
+
+function detectAction(text, usersList, currentUser) {
+    const lower = text.toLowerCase();
+    
+    if (
+        lower.includes("complete") ||
+        lower.includes("submit") ||
+        lower.includes("meeting") ||
+        lower.includes("assign") ||
+        lower.includes("finish")
+    ) {
+        return {
+            task: text,
+            assignee: extractName(text, usersList, currentUser),
+            deadline: extractTime(text)
+        };
+    }
+    
+    return null;
+}
+
 const MeetingRoom = () => {
     const { id: meetingId } = useParams();
     const navigate = useNavigate();
@@ -57,11 +95,94 @@ const MeetingRoom = () => {
     const secretKey = urlParams.get('key');
     const initMic = urlParams.get('mic') === 'true';
     const initCam = urlParams.get('cam') === 'true';
+    const [isMicOn, setIsMicOn] = useState(initMic);
 
     const [userName] = useState('Speaker_' + Math.floor(Math.random() * 99));
     const [meetingTitle, setMeetingTitle] = useState('Nexus Session');
     const [activeSidebar, setActiveSidebar] = useState('participants'); // 'participants', 'transcripts', 'tasks'
     const [error, setError] = useState('');
+
+    // --- New Username State ---
+    const [currentUser, setCurrentUser] = useState('');
+    const [isJoined, setIsJoined] = useState(false);
+    const [users, setUsers] = useState({});
+    
+    // --- New Pipeline States ---
+    const [transcripts, setTranscripts] = useState([]);
+    const [actions, setActions] = useState([]);
+
+    // --- New Host State ---
+    const [isHost, setIsHost] = useState(false);
+    const [hostName, setHostName] = useState("");
+
+    // --- Speech Recognition Refs ---
+    const recognitionRef = useRef(null);
+    const isRunningRef = useRef(false);
+    const usersListRef = useRef([]);
+    const transcriptHistoryRef = useRef(new Set());
+
+    useEffect(() => {
+        usersListRef.current = [...Object.values(users), currentUser || userName].filter(Boolean);
+    }, [users, currentUser, userName]);
+
+    useEffect(() => {
+        if (!socket) return;
+        
+        const handleHostInfo = (data) => {
+            setHostName(data.hostName);
+            if (currentUser && currentUser === data.hostName) {
+                setIsHost(true);
+            } else {
+                setIsHost(false);
+            }
+        };
+
+        socket.on("host-info", handleHostInfo);
+
+        socket.on("user-joined-info", ({ socketId, username }) => {
+            setUsers(prev => ({ ...prev, [socketId]: username }));
+        });
+
+        socket.on("all-users-data", (allUsers) => {
+            setUsers(allUsers);
+        });
+
+        socket.on("user-left", (socketId) => {
+            setUsers(prev => {
+                const newUsers = { ...prev };
+                delete newUsers[socketId];
+                return newUsers;
+            });
+        });
+
+        socket.on("receive-transcript", (data) => {
+            console.log("📥 Received transcript:", data);
+            
+            // Duplicate Prevention (Global UI/State Level)
+            const clean = data.text.trim().toLowerCase();
+            if (transcriptHistoryRef.current.has(clean)) return;
+            transcriptHistoryRef.current.add(clean);
+
+            setTranscripts(prev => [...prev, data]);
+        });
+
+        socket.on("receive-action", (action) => {
+            setActions(prev => {
+                const isDuplicate = prev.some(a => a.task.trim().toLowerCase() === action.task.trim().toLowerCase());
+                if (isDuplicate) return prev;
+                return [...prev, action];
+            });
+        });
+
+        return () => {
+            socket.off("host-info", handleHostInfo);
+            socket.off("user-joined-info");
+            socket.off("all-users-data");
+            socket.off("user-left");
+            socket.off("receive-transcript");
+            socket.off("receive-action");
+        };
+    }, [socket, currentUser]);
 
     // --- WEBRTC Logic ---
     const { peers, localStream, initLocalCamera } = useWebRTC(socket, meetingId, secretKey);
@@ -108,6 +229,134 @@ const MeetingRoom = () => {
 
     }, [meetingId, secretKey, socket]); // Simplified dependencies to avoid loops
 
+    useEffect(() => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        
+        if (!SpeechRecognition) {
+            console.error("Speech Recognition not supported in this browser.");
+            return;
+        }
+
+        if (!recognitionRef.current) {
+            recognitionRef.current = new SpeechRecognition();
+            recognitionRef.current.continuous = true;
+            recognitionRef.current.interimResults = false;
+            recognitionRef.current.lang = "en-US";
+        }
+
+        recognitionRef.current.onstart = () => {
+            isRunningRef.current = true;
+            console.log("🎤 Mic active, start speaking...");
+        };
+        
+        recognitionRef.current.onresult = (event) => {
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                const result = event.results[i];
+                
+                // Only process finalized results
+                if (result.isFinal) {
+                    const text = result[0].transcript.trim();
+                    const clean = text.toLowerCase();
+                    
+                    // Duplicate Prevention: Ignore empty or already seen transcripts (local or remote)
+                    if (!text || transcriptHistoryRef.current.has(clean)) continue;
+                    transcriptHistoryRef.current.add(clean);
+
+                    console.log("✅ Final Transcript captured:", text);
+
+                    const speaker = currentUser || userName || "You";
+                    
+                    // Update Local State (Storage)
+                    setTranscripts(prev => [
+                        ...prev,
+                        { speaker, text }
+                    ]);
+
+                    // Emit to Socket (Downstream flow)
+                    if (socket && meetingId) {
+                        socket.emit("send-transcript", {
+                            meetingId,
+                            speaker,
+                            text
+                        });
+                    }
+
+                    // Action Item Extraction (Maintain existing AI logic)
+                    const action = detectAction(text, usersListRef.current, speaker);
+                    if (action) {
+                        setActions(prev => {
+                            const isDuplicate = prev.some(a => a.task.trim().toLowerCase() === action.task.trim().toLowerCase());
+                            if (isDuplicate) return prev;
+                            
+                            const newActions = [...prev, action];
+                            localStorage.setItem("actions", JSON.stringify(newActions));
+                            return newActions;
+                        });
+                    }
+                }
+            }
+        };
+
+        recognitionRef.current.onerror = (event) => {
+            console.log("Speech error:", event.error);
+            if (event.error === "aborted") return;
+            isRunningRef.current = false;
+        };
+        
+        recognitionRef.current.onend = () => {
+            isRunningRef.current = false;
+            if (isMicOn) {
+                setTimeout(() => {
+                    if (!isRunningRef.current && recognitionRef.current) {
+                        try {
+                            recognitionRef.current.start();
+                        } catch (e) {
+                            console.log("Restart blocked");
+                        }
+                    }
+                }, 1000);
+            }
+        };
+
+        if (initMic) {
+            setTimeout(() => {
+                if (!isRunningRef.current && recognitionRef.current) {
+                    try {
+                        recognitionRef.current.start();
+                    } catch (e) {
+                        console.log("Already running");
+                    }
+                }
+            }, 500);
+        }
+
+        // Cleanup on component unmount
+        return () => {
+            if (recognitionRef.current) {
+                recognitionRef.current.onend = null;
+                try { recognitionRef.current.stop(); } catch(e){}
+            }
+            isRunningRef.current = false;
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!recognitionRef.current) return;
+        
+        if (isMicOn) {
+            if (!isRunningRef.current) {
+                try {
+                    recognitionRef.current.start();
+                } catch (e) {}
+            }
+        } else {
+            try {
+                recognitionRef.current.stop();
+            } catch (e) {}
+            isRunningRef.current = false;
+        }
+    }, [isMicOn]);
+
     if (isInitializing) {
         return (
             <div className="h-screen flex flex-col items-center justify-center bg-slate-950">
@@ -135,6 +384,46 @@ const MeetingRoom = () => {
     return (
         <div className="h-screen flex flex-col bg-slate-950 text-slate-100 overflow-hidden font-sans">
             
+            {/* --- Username Modal Overlay --- */}
+            {!isJoined && (
+                <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+                    <div className="bg-slate-900 p-8 rounded-[2rem] border border-white/10 max-w-md w-full shadow-2xl">
+                        <h2 className="text-2xl font-bold mb-4">Join Meeting</h2>
+                        <input 
+                            type="text" 
+                            value={currentUser} 
+                            onChange={(e) => setCurrentUser(e.target.value)} 
+                            className="w-full bg-slate-800 border border-white/10 text-white rounded-xl px-4 py-3 mb-6 focus:outline-none focus:ring-2 focus:ring-brand-500 placeholder-slate-400"
+                            placeholder="Enter your username"
+                        />
+                        <button 
+                            onClick={() => {
+                                if (currentUser.trim()) {
+                                    setIsJoined(true);
+                                    
+                                    localStorage.setItem("activeMeeting", JSON.stringify({
+                                        meetingId: meetingId,
+                                        key: secretKey,
+                                        mic: true,
+                                        cam: true
+                                    }));
+
+                                    if (socket) {
+                                        socket.emit("join-meeting-user", {
+                                            meetingId,
+                                            username: currentUser.trim()
+                                        });
+                                    }
+                                }
+                            }} 
+                            className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-3 rounded-xl transition-colors shadow-lg shadow-brand-500/20"
+                        >
+                            Join
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {/* 🖥️ Top Navigation Bar */}
             <header className="h-20 border-b border-white/5 flex items-center justify-between px-10 bg-slate-900/40 backdrop-blur-3xl z-40">
                 <div className="flex items-center space-x-8">
@@ -176,11 +465,11 @@ const MeetingRoom = () => {
                 <main className="flex-1 p-8 overflow-y-auto content-center grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 max-w-[1700px] mx-auto w-full">
                     
                     {/* Local Participant */}
-                    <VideoPlayer stream={localStream} isLocal={true} name={`${userName} (You)`} />
+                    <VideoPlayer stream={localStream} isLocal={true} name={`${currentUser || userName} (You)`} />
 
                     {/* Remote Participants (Full Mesh) */}
                     {peers.map((peer) => (
-                        <VideoPlayer key={peer.peerId} stream={peer.stream} isLocal={false} name={peer.userName || `Remote Participant`} />
+                        <VideoPlayer key={peer.peerId} stream={peer.stream} isLocal={false} name={users[peer.peerId] ? users[peer.peerId] : "Guest"} />
                     ))}
 
                     {/* Alone State Card */}
@@ -227,34 +516,59 @@ const MeetingRoom = () => {
                                     <div className="flex items-center p-4 bg-brand-500/10 rounded-2xl border border-brand-500/20">
                                         <div className="w-12 h-12 bg-brand-500 rounded-2xl flex items-center justify-center font-bold mr-4">You</div>
                                         <div className="flex-1">
-                                            <p className="text-sm font-bold">{userName}</p>
-                                            <p className="text-[10px] text-brand-400 font-bold uppercase tracking-tight">Meeting Host</p>
+                                            <p className="text-sm font-bold">{currentUser || userName}</p>
+                                            <p className="text-[10px] text-brand-400 font-bold uppercase tracking-tight">{isHost ? "Meeting Host" : "Participant"}</p>
                                         </div>
                                     </div>
                                     {peers.map(p => (
                                         <div key={p.peerId} className="flex items-center p-4 bg-white/5 rounded-2xl border border-white/5">
                                             <div className="w-12 h-12 bg-slate-800 rounded-2xl flex items-center justify-center font-bold mr-4">GU</div>
-                                            <p className="text-sm font-bold">Guest_{p.peerId.substring(0,4)}</p>
+                                            <div className="flex-1">
+                                                <p className="text-sm font-bold">{users[p.peerId] ? users[p.peerId] : "Guest"}</p>
+                                                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tight">{users[p.peerId] === hostName ? "Meeting Host" : "Participant"}</p>
+                                            </div>
                                         </div>
                                     ))}
                                 </motion.div>
                             )}
                             
                             {activeSidebar === 'transcripts' && (
-                                <motion.div key="t-tab" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }}  className="text-center py-20 text-slate-500">
-                                    <p className="text-sm italic">AI Transcription is active and listening...</p>
+                                <motion.div key="t-tab" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }}  className="text-left py-4 text-slate-300">
+                                    <p className="text-sm italic mb-4 text-slate-500">AI Transcription is active and listening...</p>
+                                    <div className="space-y-4">
+                                        {transcripts.length === 0 ? (
+                                            <p className="text-sm">No transcripts yet</p>
+                                        ) : (
+                                            transcripts.map((t, i) => (
+                                                <p key={i} className="text-sm"><strong className="text-brand-400">{t.speaker}:</strong> {t.text}</p>
+                                            ))
+                                        )}
+                                    </div>
                                 </motion.div>
                             )}
 
                             {activeSidebar === 'tasks' && (
-                                <motion.div key="k-tab" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }}  className="text-center py-20 text-slate-500">
-                                    <p className="text-sm italic">Capture action items automatically with GPT Monitoring.</p>
+                                <motion.div key="k-tab" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }}  className="text-left py-4 text-slate-300">
+                                    <p className="text-sm italic mb-4 text-slate-500">Capture action items automatically with GPT Monitoring.</p>
+                                    <div className="space-y-4">
+                                        {actions.length === 0 ? (
+                                            <p className="text-sm">No actions assigned to you yet</p>
+                                        ) : (
+                                            actions.map((a, i) => (
+                                                <div key={i} className="p-3 bg-brand-500/10 rounded-xl border border-brand-500/20">
+                                                    <p className="text-sm font-bold"><strong>Task:</strong> {a.task}</p>
+                                                    <p className="text-xs text-slate-400 mt-1"><strong>Assigned to:</strong> {a.assignee}</p>
+                                                    <p className="text-xs text-slate-400"><strong>Deadline:</strong> {a.deadline}</p>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
                                 </motion.div>
                             )}
 
                             {activeSidebar === 'chat' && (
                                 <motion.div key="c-tab" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }} className="h-full min-h-[400px]">
-                                    <GroupChat roomId={meetingId} userName={userName} localStream={localStream} />
+                                    <GroupChat roomId={meetingId} userName={currentUser || userName} localStream={localStream} />
                                 </motion.div>
                             )}
                         </AnimatePresence>
@@ -265,8 +579,8 @@ const MeetingRoom = () => {
             {/* 🕹️ Floating Command Toolbar */}
             <footer className="h-32 flex items-center justify-center translate-y-0 z-50">
                 <div className="bg-slate-900/60 backdrop-blur-3xl px-12 py-5 rounded-[2.5rem] border border-white/10 flex items-center space-x-8 shadow-4xl shadow-black/50">
-                    <button className="w-14 h-14 rounded-2xl bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-all group">
-                        <Mic className="w-6 h-6 text-slate-400 group-hover:text-brand-500 transition-colors" />
+                    <button onClick={() => setIsMicOn(prev => !prev)} className={`w-14 h-14 rounded-2xl ${isMicOn ? 'bg-slate-800 hover:bg-slate-700 text-brand-500' : 'bg-red-500/20 hover:bg-red-500/30 text-red-500'} flex items-center justify-center transition-all group`}>
+                        <Mic className="w-6 h-6 transition-colors" />
                     </button>
                     <button className="w-14 h-14 rounded-2xl bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-all group">
                         <VidIcon className="w-6 h-6 text-slate-400 group-hover:text-brand-500 transition-colors" />
@@ -283,7 +597,10 @@ const MeetingRoom = () => {
                     
                     <div className="w-px h-10 bg-white/10 mx-2" />
                     
-                    <button className="w-14 h-14 rounded-2xl bg-red-500 hover:bg-red-600 flex items-center justify-center transition-all shadow-xl shadow-red-500/20" onClick={() => navigate('/')}>
+                    <button className="w-14 h-14 rounded-2xl bg-red-500 hover:bg-red-600 flex items-center justify-center transition-all shadow-xl shadow-red-500/20" onClick={() => {
+                        localStorage.removeItem("activeMeeting");
+                        navigate('/');
+                    }}>
                         <CalendarX className="w-6 h-6" />
                     </button>
                 </div>

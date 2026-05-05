@@ -13,6 +13,17 @@ const Dashboard = () => {
   const [joinSecretKey, setJoinSecretKey] = useState('');
   const [joinError, setJoinError] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const activeMeeting = JSON.parse(localStorage.getItem("activeMeeting"));
+
+  useEffect(() => {
+    if (activeMeeting && activeMeeting.meetingId) {
+      if (!activeMeeting.key) {
+        navigate('/');
+        return;
+      }
+    //   navigate(`/meeting/${activeMeeting.meetingId}?key=${activeMeeting.key}&mic=true&cam=true`);
+    }
+  }, []);
 
   useEffect(() => {
     fetch(`${import.meta.env.VITE_BACKEND_URL || ''}/api/meetings`)
@@ -100,6 +111,30 @@ const Dashboard = () => {
                 <Users className="w-7 h-7" />
                 <span>Join Meeting</span>
             </motion.button>
+        </div>
+        {activeMeeting && (
+          <button
+            onClick={() => navigate(`/meeting/${activeMeeting.meetingId}?key=${activeMeeting.key}&mic=true&cam=true`)}
+            style={{
+              background: "#00C2FF",
+              padding: "10px",
+              borderRadius: "8px",
+              marginTop: "10px"
+            }}
+          >
+            🔄 Rejoin Ongoing Meeting
+          </button>
+        )}
+        <div className="absolute top-10 right-10">
+            <button 
+                onClick={() => {
+                    localStorage.removeItem('token');
+                    navigate('/login');
+                }}
+                className="bg-red-500/10 hover:bg-red-500/20 text-red-500 px-6 py-3 rounded-2xl font-black text-sm flex items-center justify-center transition-all border border-red-500/20 shadow-xl"
+            >
+                Logout
+            </button>
         </div>
       </header>
 
